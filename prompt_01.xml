@@ -1,0 +1,240 @@
+
+<prompt name = "main">
+Please provide the answer and contents of each file in XML format in the same way as provided currently.
+Please take further instructions from the prompt nodes with name 'general' and 'target'.
+Assume that 'target' is the main task to perform. Assume 'general' and other nodes setting up the context.
+</prompt>
+
+<prompt name = "target">
+Please write program for 2D convolution using kernel_slicer. 
+Assume HDR image with 4 floats per pixel is on input and the same image is on output.
+Please make separate kernel functions for setting up convolution kernel for different tasks: blur, sharpening and other commonly used.
+Please make C++ files, CMakeLists.txt and config file 'kmake.json'.
+</prompt>
+
+<prompt name = "general">
+kernel_slicer is a parallel programming technology. It tooks C++ class on input (called main class further).
+In class there are kernel and control functions. kernel funcions have specific prefix like "kernel1D_" or "kernel2D_" and have parallel loops inside.
+A single parallel loop for "kernel1D_", two nested  parallel loops for "kernel2D_" and e.t.c. 
+Inside kernels there can not be two (and more) consecutive loops. If we have them in the algorithm, it should be split to two consecutive kernel call.
+
+Control functions call kernel functions and thus define algorithm of kernel launch.
+A kernel from kernel is not allowed to call. A control function also could call kernell only with 1 level of recursion.
+Control from control is not allowed to call. But both kernel and control functions can call common function members.
+Some functions like CommitDeviceData and GetExecutionTime must be in the class.
+
+For control functions pointers must be marked with special construction [[size("...")]] where ... is an expression which depend on constrol function parameters and this expression is used to count element number for array represented with a pointer. All pointers coulbd be marked with "const" (this mean "in" sematics for data) or if they are not marked with "const" they assumed to be with an "out" semetics. "inout" sematrics is not allowed with pointers. 
+Therefore please always add "const" for input arrays and use separatare ointers without "const" for output.
+
+Inside control functions vectors (mean std::vector) must not be declared/created. 
+Move any vector declaration inside class.
+All vectors must be members of the main class.
+
+For vector types it uses HLSL semntic like float2, float3, float4 and e.t.c.
+These types are difined in "LiteMath.h". If we need any HLSL type just include "LiteMath.h" and make it public with using directive like: using LiteMath::float4x4 for float4x4 type.
+
+When generating a CMake file, pay attention to the comments next to each file. Do not add files and instructions marked as #specific in the comments to new examples.
+</prompt>
+
+<file name="reinhard.cpp">
+
+// Here is an example of Reinhard tone mapping implementation in kernel_slicer:
+
+#include "LiteMath.h"
+
+using LiteMath::float2;
+using LiteMath::float3;
+using LiteMath::float4; 
+
+class ReinhardTM
+{
+public:
+  ReinhardTM(){}
+  
+  virtual void Run(int w, int h, const float* inData [[size("w*h*4")]], uint32_t* outData [[size("w*h")]]);
+
+  virtual void CommitDeviceData(){}
+  virtual void GetExecutionTime(const char* a_funcName, float a_out[4]){ a_out[0] = m_time;}
+
+  float getWhitePoint() const { return whitePoint; }
+
+protected:
+
+  virtual void kernel1D_finMax(const float* inData, int size);
+  virtual void kernel2D_process(int w, int h, const float* inData, uint32_t* outData);
+
+  float whitePoint;
+  float m_time;
+};
+
+float reinhard_extended(float v, float max_white)
+{
+  float numerator = v * (1.0f + (v / (max_white * max_white)));
+  return numerator / (1.0f + v);
+}
+
+void ReinhardTM::kernel1D_finMax(const float* hdrData, int size)
+{
+  whitePoint = 0.0;
+  for(int i=0;i<size;i++)
+  {
+    float r = hdrData[4*i+0];
+    float g = hdrData[4*i+1];
+    float b = hdrData[4*i+2];
+    float maxValue = std::max(r, std::max(g,b));
+    whitePoint = std::max(whitePoint, maxValue);
+  }  
+
+}
+
+void ReinhardTM::kernel2D_process(int w, int h, const float* hdrData, uint32_t* ldrData)
+{
+  for(int y=0;y<h;y++)
+  {
+    for(int x=0;x<w;x++)
+    {
+      float r = reinhard_extended(hdrData[4*(y*w+x)+0], whitePoint);
+      float g = reinhard_extended(hdrData[4*(y*w+x)+1], whitePoint);
+      float b = reinhard_extended(hdrData[4*(y*w+x)+2], whitePoint);
+      
+      int ir  = (int)std::min(r*255.0f, 255.0f);
+      int ig  = (int)std::min(g*255.0f, 255.0f);
+      int ib  = (int)std::min(b*255.0f, 255.0f);
+      
+      ldrData[y*w+x] = 0xFF000000 | (ib << 16) | (ig << 8) | ir;
+    }
+  }
+}
+
+void ReinhardTM::Run(int w, int h, const float* hdrData, uint32_t* ldrData)
+{
+  auto before = std::chrono::high_resolution_clock::now();
+  kernel1D_finMax(hdrData, w*h);
+  kernel2D_process(w,h,hdrData,ldrData);
+  m_time = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - before).count()/1000.f;
+}
+
+// It has two kernels (kernel1D_finMax and kernel2D_process). 
+// It has single control function Run where "inData" pointer is input pointer with array size of w*h*4 and oputput outData pointer
+// kernel1D_finMax has 1D parallel loop indexed by "i".
+// kernel2D_process has two nested parallel loops indexed by "y" and "x".
+<file/>
+
+<file name="main.cpp">
+  // Here an example of using this class with the generated by kernel_slicer code:
+
+  std::shared_ptr<ReinhardTM> pImpl = nullptr;
+  if(onGPU)
+  {
+    auto ctx   = vk_utils::globalContextGet(false, 0);
+    pImpl = CreateReinhardTM_Generated(ctx, w*h);
+  }
+  else
+    pImpl = std::make_shared<ReinhardTM>();
+
+  pImpl->CommitDeviceData();
+  pImpl->Run(w, h, hdrData.data(), ldrData.data()); // (const float4*)
+
+  if(onGPU)
+    LiteImage::SaveBMP("zout_gpu.bmp", ldrData.data(), w, h);
+  else
+    LiteImage::SaveBMP("zout_cpu.bmp", ldrData.data(), w, h);
+
+  std::cout << "whitePoint = " << pImpl->getWhitePoint() << std::endl;
+
+<file/>
+
+<file name="CMakeLists.txt">
+cmake_minimum_required (VERSION 3.8)
+project (test)
+
+# get rid of annoying MSVC warnings.
+add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+set (CMAKE_CXX_STANDARD 17)
+option(USE_VULKAN "Enable Vulkan code" OFF)
+
+include_directories(".")
+if(WIN32)
+  link_directories(${ADDITIONAL_LIBRARY_DIRS})
+endif()
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
+message(STATUS ${CMAKE_CURRENT_SOURCE_DIR})
+
+find_package(OpenMP)
+find_package(Vulkan)
+include_directories(${Vulkan_INCLUDE_DIR})
+
+include_directories("external/vkutils" 
+                    "external/volk" 
+                    "external/LiteMath"
+                    "external/tinyexr"
+                    "external/tinyexr/deps/miniz")
+
+link_directories("external/volk")
+
+add_compile_definitions(USE_VOLK)
+
+#uncomment this to detect broken memory problems via gcc sanitizers
+#set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer -fsanitize=leak -fsanitize=undefined -fsanitize=bounds-strict")
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Wno-attributes")
+
+set(MAIN_SOURCE main.cpp 
+                reinhard.cpp
+                external/LiteMath/Image2d.cpp
+                imageutils.cpp)
+
+set(VKGEN_SOURCE reinhard_generated.cpp
+                 reinhard_generated_init.cpp
+                 reinhard_generated_ds.cpp)
+
+set(VKUTILS_SOURCE external/vkutils/vk_utils.cpp 
+                   external/vkutils/vk_copy.cpp
+                   external/vkutils/vk_buffers.cpp
+                   external/vkutils/vk_images.cpp
+                   external/vkutils/vk_context.cpp
+                   external/vkutils/vk_alloc_simple.cpp
+                   external/vkutils/vk_pipeline.cpp
+                   external/vkutils/vk_descriptor_sets.cpp)    
+
+add_library(miniz external/tinyexr/deps/miniz/miniz.c) #specific
+
+if(USE_VULKAN)
+
+  add_subdirectory(external/volk)
+  add_compile_definitions(USE_VOLK)
+  add_compile_definitions(USE_VULKAN)
+
+  add_executable(testapp ${MAIN_SOURCE} 
+                         ${VKGEN_SOURCE} 
+                         ${VKUTILS_SOURCE})
+
+  target_link_libraries(testapp LINK_PUBLIC miniz ${Vulkan_LIBRARY} ${FREEIMAGE_LIBRARIES} OpenMP::OpenMP_CXX volk dl)            
+
+else()
+  
+  add_executable(testapp ${MAIN_SOURCE})
+  target_link_libraries(testapp LINK_PUBLIC miniz ${Vulkan_LIBRARY} ${FREEIMAGE_LIBRARIES} OpenMP::OpenMP_CXX)  
+
+endif()
+
+set_target_properties(testapp PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
+<file/>
+
+<file name="kmake.json">
+{
+    "mainClass"     : "ReinhardTM", // must explicitly specify main class as main process 'unit' for kernel_slicer
+    "options" : {
+        "-reorderLoops" : "YX",      // reorde loops
+        "-shaderCC"     : "slang",   // say slang will be used
+        "-suffix"       : "_GPU",    // set suffix for generated code
+        "-const_ubo"    : "1"        // optimisation that may be used in most simple cases
+    },
+    "source" : ["reinhard.cpp"],
+    "includeProcess" : [],
+    "includeIgnore"  : ["../LiteMath"],
+    "end" : ""
+}
+<file/>
