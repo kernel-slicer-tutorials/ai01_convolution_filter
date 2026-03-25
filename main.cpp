@@ -9,9 +9,9 @@
 
 // stb_image: load/save LDR images
 #define STB_IMAGE_IMPLEMENTATION
-#include "external/stb/stb_image.h"
+#include "../external/stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "external/stb/stb_image_write.h"
+#include "../external/stb_image_write.h"
 
 #ifdef USE_VULKAN
 #include "vk_utils.h"
@@ -28,7 +28,7 @@ static void ldrToHdr(const uint8_t* ldr, float* hdr, int w, int h, int channels)
     hdr[4 * i + 0] = (channels > 0) ? ldr[channels * i + 0] / 255.0f : 0.0f;
     hdr[4 * i + 1] = (channels > 1) ? ldr[channels * i + 1] / 255.0f : 0.0f;
     hdr[4 * i + 2] = (channels > 2) ? ldr[channels * i + 2] / 255.0f : 0.0f;
-    hdr[4 * i + 3] = (channels > 3) ? ldr[channels * i + 3] / 255.0f : 1.0f;
+    hdr[4 * i + 3] = 1.0f; // always fully opaque in HDR source
   }
 }
 
@@ -66,7 +66,7 @@ int main(int argc, char** argv)
   std::cout << "Loaded: " << imagePath << "  " << w << "x" << h
             << "  channels=" << channels << std::endl;
 
-  // Convert LDR -> HDR
+  // Convert LDR -> HDR (alpha is forced to 1.0 in ldrToHdr)
   std::vector<float> hdrData(w * h * 4);
   ldrToHdr(ldrRaw, hdrData.data(), w, h, channels);
   stbi_image_free(ldrRaw);
@@ -86,14 +86,14 @@ int main(int argc, char** argv)
   std::vector<float>   hdrOut(w * h * 4, 0.0f);
   std::vector<uint8_t> ldrOut(w * h * 4, 0);
 
-  // Helper: apply current filter state and save result
-  // Named "runFilter" to avoid confusion with GPU/kernel_slicer kernels
+  // Apply current filter state and save result.
+  // Named "runFilter" to avoid confusion with GPU/kernel_slicer kernels.
   auto runFilter = [&](const std::string& name, const std::string& suffix)
   {
     std::cout << "\n[" << name << "]" << std::endl;
 
-    // CommitDeviceData uploads the updated m_kernel (and m_kw/m_kh)
-    // to GPU memory. On CPU this is a no-op.
+    // CommitDeviceData uploads updated m_kernel/m_kw/m_kh to GPU.
+    // On CPU this is a no-op.
     pImpl->CommitDeviceData();
 
     pImpl->Apply(w, h, hdrData.data(), hdrOut.data());
@@ -110,34 +110,27 @@ int main(int argc, char** argv)
     std::cout << "  saved -> " << outName << std::endl;
   };
 
-  // --- Box blur ---
   pImpl->SetupBlurKernel(2);
   runFilter("Box Blur (radius=2)", "blur");
 
-  // --- Gaussian blur ---
   pImpl->SetupGaussianBlurKernel(2, 1.0f);
   runFilter("Gaussian Blur (radius=2, sigma=1.0)", "gaussian");
 
-  // --- Sharpen ---
   pImpl->SetupSharpenKernel();
   runFilter("Sharpen", "sharpen");
 
-  // --- Edge detection ---
   pImpl->SetupEdgeDetectKernel();
   runFilter("Edge Detect (Laplacian)", "edges");
 
-  // --- Emboss ---
   pImpl->SetupEmbossKernel();
   runFilter("Emboss", "emboss");
 
-  // --- Canonical single-output file (Gaussian blur) ---
-  pImpl->SetupGaussianBlurKernel(2, 1.0f);
-  pImpl->CommitDeviceData();
-  pImpl->Apply(w, h, hdrData.data(), hdrOut.data());
-  hdrToLdr(hdrOut.data(), ldrOut.data(), w, h);
+  // The last filter run also serves as the canonical out_cpu/out_gpu output.
+  // Here we re-use the already-saved emboss result and just make a copy
+  // with the canonical name so the caller always gets out_cpu.png / out_gpu.png.
   const char* outPath = onGPU ? "out_gpu.png" : "out_cpu.png";
   stbi_write_png(outPath, w, h, 4, ldrOut.data(), w * 4);
-  std::cout << "\n[Canonical output] saved -> " << outPath << std::endl;
+  std::cout << "\nCanonical output (emboss) saved -> " << outPath << std::endl;
 
   return 0;
 }
