@@ -29,7 +29,7 @@
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build_debug/testapp",
-            "args": ["--cpu"],
+            "args": ["--gpu"],
             "stopAtEntry": false,
             "cwd": "${workspaceFolder}",
             "environment": [],

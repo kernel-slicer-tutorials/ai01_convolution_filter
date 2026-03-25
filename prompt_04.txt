@@ -1,0 +1,18 @@
+Change #1: move halfKW and halfKH inside the loop. kernel_slicer currently does not allow to define variables out of the parallel loop inside the kernel.
+           In the computations is strongly required before the loop, they can be performed and the result may be saved in some class members.
+
+Chanhe #2: Explicitly print time for execution and copy in main.cpp near GetExecutionTime
+    
+    float timing[4] = {};
+    pImpl->GetExecutionTime("Apply", timing);
+    std::cout << "  time (exec) = " << timing[0] << " ms" << std::endl;
+    std::cout << "  time (copy) = " << timing[1] + timing[2] << " ms" << std::endl;
+    std::cout << "  time (ovrh) = " << timing[3] << " ms" << std::endl;
+
+Chanhe #3: Do not make volk as subdirectory. 
+#add_subdirectory(../external/volk)
+
+Change #4: Explicitly define 'CreateConvolution2D_Generated' function:  
+#ifdef USE_VULKAN
+std::shared_ptr<Convolution2D> CreateConvolution2D_Generated(vk_utils::VulkanContext a_ctx, size_t a_maxThreadsGenerated);
+#endif

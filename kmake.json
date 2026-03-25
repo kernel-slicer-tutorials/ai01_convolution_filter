@@ -8,6 +8,6 @@
     },
     "source"         : ["convolution.cpp"],
     "includeProcess" : [],
-    "includeIgnore"  : ["../LiteMath"],
+    "includeIgnore"  : ["../external/LiteMath"],
     "end" : ""
 }

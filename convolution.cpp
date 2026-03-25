@@ -73,13 +73,13 @@ void Convolution2D::kernel2D_convolve(int w, int h,
                                       const float* inData,
                                       float*       outData)
 {
-  int halfKW = m_kw / 2;
-  int halfKH = m_kh / 2;
 
   for (int y = 0; y < h; y++)
   {
     for (int x = 0; x < w; x++)
     {
+      const int halfKW = m_kw / 2;
+      const int halfKH = m_kh / 2;
       float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
 
       for (int ky = 0; ky < m_kh; ++ky)
