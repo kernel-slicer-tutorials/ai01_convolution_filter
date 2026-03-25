@@ -1,0 +1,13 @@
+{
+    "mainClass"     : "Convolution2D",
+    "options" : {
+        "-reorderLoops" : "YX",
+        "-shaderCC"     : "slang",
+        "-suffix"       : "_Generated",
+        "-const_ubo"    : "1"
+    },
+    "source"         : ["convolution.cpp"],
+    "includeProcess" : [],
+    "includeIgnore"  : ["../LiteMath"],
+    "end" : ""
+}

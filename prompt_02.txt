@@ -1,0 +1,455 @@
+Update main.cpp. Please make some changes:
+
+1) Please rename "runKernel" to "runFilter" or some other to prevent misunderstanding about comvolution kernels and GPU kernels.
+
+1) Create pImpl only once. Do not create it each time when "runKernel" is called.
+
+2) After setting convolutional kernel with "SetupBlurKernel" or "SetupGaussianBlurKernel" or other please explicitly call pImpl->CommitDeviceData(). This will update m_kernel vector on GPU.
+
+3) Please explicitly reserve m_kernel in constructor to some value (suupose 9) to prevent actuall allocation during setting convolutional kernel.
+
+4) Please always fill alpha channel with 255. For some reason edjes filer always produce fully transparent image.
+
+=== convolution.h ===
+
+#pragma once
+#include <vector>
+#include <cstdint>
+#include <chrono>
+#include <memory>
+#include <algorithm>
+#include <cmath>
+
+#include "LiteMath.h"
+
+using LiteMath::float2;
+using LiteMath::float3;
+using LiteMath::float4;
+
+class Convolution2D
+{
+public:
+  Convolution2D(){}
+
+  // Setup kernel functions (fill m_kernel, m_kw, m_kh)
+  void SetupBlurKernel(int radius);
+  void SetupSharpenKernel();
+  void SetupEdgeDetectKernel();
+  void SetupEmbossKernel();
+  void SetupGaussianBlurKernel(int radius, float sigma);
+
+  virtual void Apply(int w, int h,
+                     const float* inData  [[size("w*h*4")]],
+                     float*       outData [[size("w*h*4")]]);
+
+  virtual void CommitDeviceData(){}
+  virtual void GetExecutionTime(const char* a_funcName, float a_out[4]){ a_out[0] = m_time; }
+
+protected:
+  virtual void kernel2D_convolve(int w, int h,
+                                 const float* inData,
+                                 float*       outData);
+
+  // convolution kernel stored as flat array [kh * kw]
+  std::vector<float> m_kernel;
+  int   m_kw = 1;
+  int   m_kh = 1;
+  float m_time = 0.0f;
+};
+
+=== convolution.cpp ===
+
+#include "convolution.h"
+
+// ---------------------------------------------------------------------------
+// Kernel setup helpers
+// ---------------------------------------------------------------------------
+
+void Convolution2D::SetupBlurKernel(int radius)
+{
+  m_kw = 2 * radius + 1;
+  m_kh = 2 * radius + 1;
+  int sz = m_kw * m_kh;
+  m_kernel.assign(sz, 1.0f / (float)sz);
+}
+
+void Convolution2D::SetupSharpenKernel()
+{
+  m_kw = 3; m_kh = 3;
+  m_kernel = {
+     0.0f, -1.0f,  0.0f,
+    -1.0f,  5.0f, -1.0f,
+     0.0f, -1.0f,  0.0f
+  };
+}
+
+void Convolution2D::SetupEdgeDetectKernel()
+{
+  m_kw = 3; m_kh = 3;
+  // Laplacian edge detection
+  m_kernel = {
+    -1.0f, -1.0f, -1.0f,
+    -1.0f,  8.0f, -1.0f,
+    -1.0f, -1.0f, -1.0f
+  };
+}
+
+void Convolution2D::SetupEmbossKernel()
+{
+  m_kw = 3; m_kh = 3;
+  m_kernel = {
+    -2.0f, -1.0f,  0.0f,
+    -1.0f,  1.0f,  1.0f,
+     0.0f,  1.0f,  2.0f
+  };
+}
+
+void Convolution2D::SetupGaussianBlurKernel(int radius, float sigma)
+{
+  m_kw = 2 * radius + 1;
+  m_kh = 2 * radius + 1;
+  m_kernel.resize(m_kw * m_kh);
+
+  float sum = 0.0f;
+  for (int ky = -radius; ky <= radius; ++ky)
+  {
+    for (int kx = -radius; kx <= radius; ++kx)
+    {
+      float val = std::exp(-(kx * kx + ky * ky) / (2.0f * sigma * sigma));
+      int idx = (ky + radius) * m_kw + (kx + radius);
+      m_kernel[idx] = val;
+      sum += val;
+    }
+  }
+  // normalize
+  for (auto& v : m_kernel)
+    v /= sum;
+}
+
+// ---------------------------------------------------------------------------
+// kernel2D_convolve  –– the parallel kernel (2D loop)
+// ---------------------------------------------------------------------------
+
+void Convolution2D::kernel2D_convolve(int w, int h,
+                                      const float* inData,
+                                      float*       outData)
+{
+  int halfKW = m_kw / 2;
+  int halfKH = m_kh / 2;
+
+  for (int y = 0; y < h; y++)
+  {
+    for (int x = 0; x < w; x++)
+    {
+      float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
+
+      for (int ky = 0; ky < m_kh; ++ky)
+      {
+        for (int kx = 0; kx < m_kw; ++kx)
+        {
+          int sx = x + kx - halfKW;
+          int sy = y + ky - halfKH;
+
+          // clamp to border
+          sx = std::max(0, std::min(sx, w - 1));
+          sy = std::max(0, std::min(sy, h - 1));
+
+          float kval = m_kernel[ky * m_kw + kx];
+          int   pidx = 4 * (sy * w + sx);
+
+          r += inData[pidx + 0] * kval;
+          g += inData[pidx + 1] * kval;
+          b += inData[pidx + 2] * kval;
+          a += inData[pidx + 3] * kval;
+        }
+      }
+
+      int oidx = 4 * (y * w + x);
+      outData[oidx + 0] = r;
+      outData[oidx + 1] = g;
+      outData[oidx + 2] = b;
+      outData[oidx + 3] = a;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Control function Apply
+// ---------------------------------------------------------------------------
+
+void Convolution2D::Apply(int w, int h,
+                          const float* inData,
+                          float*       outData)
+{
+  auto before = std::chrono::high_resolution_clock::now();
+  kernel2D_convolve(w, h, inData, outData);
+  m_time = std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::high_resolution_clock::now() - before).count() / 1000.0f;
+}
+
+
+=== main.cpp === 
+
+#include <iostream>
+#include <vector>
+#include <string>
+#include <memory>
+#include <cstdint>
+#include <algorithm>
+
+#include "convolution.h"
+
+// stb_image: load/save LDR images
+#define STB_IMAGE_IMPLEMENTATION
+#include "../external/stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "../external/stb_image_write.h"
+
+#ifdef USE_VULKAN
+#include "vk_utils.h"
+#include "convolution_generated.h"  // generated by kernel_slicer
+#endif
+
+// -----------------------------------------------------------------------
+// LDR (uint8) -> HDR (float, linear)
+// -----------------------------------------------------------------------
+static void ldrToHdr(const uint8_t* ldr, float* hdr, int w, int h, int channels)
+{
+  for (int i = 0; i < w * h; ++i)
+  {
+    hdr[4 * i + 0] = (channels > 0) ? ldr[channels * i + 0] / 255.0f : 0.0f;
+    hdr[4 * i + 1] = (channels > 1) ? ldr[channels * i + 1] / 255.0f : 0.0f;
+    hdr[4 * i + 2] = (channels > 2) ? ldr[channels * i + 2] / 255.0f : 0.0f;
+    hdr[4 * i + 3] = (channels > 3) ? ldr[channels * i + 3] / 255.0f : 1.0f;
+  }
+}
+
+// -----------------------------------------------------------------------
+// HDR (float, linear) -> LDR (uint8, clamped)
+// -----------------------------------------------------------------------
+static void hdrToLdr(const float* hdr, uint8_t* ldr, int w, int h)
+{
+  for (int i = 0; i < w * h; ++i)
+  {
+    ldr[4 * i + 0] = (uint8_t)std::min(std::max(hdr[4 * i + 0] * 255.0f, 0.0f), 255.0f);
+    ldr[4 * i + 1] = (uint8_t)std::min(std::max(hdr[4 * i + 1] * 255.0f, 0.0f), 255.0f);
+    ldr[4 * i + 2] = (uint8_t)std::min(std::max(hdr[4 * i + 2] * 255.0f, 0.0f), 255.0f);
+    ldr[4 * i + 3] = (uint8_t)std::min(std::max(hdr[4 * i + 3] * 255.0f, 0.0f), 255.0f);
+  }
+}
+
+// -----------------------------------------------------------------------
+// Run convolution with a given impl and save result
+// -----------------------------------------------------------------------
+static void runAndSave(std::shared_ptr<Convolution2D> pImpl,
+                       int w, int h,
+                       const std::vector<float>& hdrIn,
+                       const char* outPath)
+{
+  std::vector<float>   hdrOut(w * h * 4, 0.0f);
+  std::vector<uint8_t> ldrOut(w * h * 4, 0);
+
+  pImpl->CommitDeviceData();
+  pImpl->Apply(w, h, hdrIn.data(), hdrOut.data());
+
+  float timing[4] = {};
+  pImpl->GetExecutionTime("Apply", timing);
+  std::cout << "  time = " << timing[0] << " ms" << std::endl;
+
+  hdrToLdr(hdrOut.data(), ldrOut.data(), w, h);
+  stbi_write_png(outPath, w, h, 4, ldrOut.data(), w * 4);
+  std::cout << "  saved -> " << outPath << std::endl;
+}
+
+// -----------------------------------------------------------------------
+int main(int argc, char** argv)
+{
+  bool onGPU = false;
+  for (int i = 1; i < argc; ++i)
+    if (std::string(argv[i]) == "--gpu")
+      onGPU = true;
+
+  // Load LDR source image
+  const char* imagePath = "../data/texture1.bmp";
+  int w = 0, h = 0, channels = 0;
+  uint8_t* ldrRaw = stbi_load(imagePath, &w, &h, &channels, 0);
+  if (!ldrRaw)
+  {
+    std::cerr << "ERROR: cannot load image: " << imagePath << std::endl;
+    return 1;
+  }
+  std::cout << "Loaded: " << imagePath << "  " << w << "x" << h
+            << "  channels=" << channels << std::endl;
+
+  // Convert LDR -> HDR
+  std::vector<float> hdrData(w * h * 4);
+  ldrToHdr(ldrRaw, hdrData.data(), w, h, channels);
+  stbi_image_free(ldrRaw);
+
+  // ------------------------------------------------------------------
+  // Helper lambda: build impl, setup kernel, run, save
+  // ------------------------------------------------------------------
+  auto runKernel = [&](const std::string& name,
+                       const std::string& suffix,
+                       auto setupFn)
+  {
+    std::cout << "\n[" << name << "]" << std::endl;
+    std::shared_ptr<Convolution2D> pImpl;
+
+#ifdef USE_VULKAN
+    if (onGPU)
+    {
+      auto ctx = vk_utils::globalContextGet(false, 0);
+      pImpl = CreateConvolution2D_Generated(ctx, w * h);
+    }
+    else
+#endif
+      pImpl = std::make_shared<Convolution2D>();
+
+    setupFn(pImpl);
+
+    std::string outName = onGPU ? ("out_gpu_" + suffix + ".png")
+                                : ("out_cpu_" + suffix + ".png");
+    runAndSave(pImpl, w, h, hdrData, outName.c_str());
+  };
+
+  // Run several convolution types
+  runKernel("Box Blur (radius=2)", "blur",
+    [](std::shared_ptr<Convolution2D> p){ p->SetupBlurKernel(2); });
+
+  runKernel("Gaussian Blur (radius=2, sigma=1.0)", "gaussian",
+    [](std::shared_ptr<Convolution2D> p){ p->SetupGaussianBlurKernel(2, 1.0f); });
+
+  runKernel("Sharpen", "sharpen",
+    [](std::shared_ptr<Convolution2D> p){ p->SetupSharpenKernel(); });
+
+  runKernel("Edge Detect (Laplacian)", "edges",
+    [](std::shared_ptr<Convolution2D> p){ p->SetupEdgeDetectKernel(); });
+
+  runKernel("Emboss", "emboss",
+    [](std::shared_ptr<Convolution2D> p){ p->SetupEmbossKernel(); });
+
+  // Canonical single-output files for CPU / GPU
+  {
+    std::cout << "\n[Gaussian Blur -> canonical output]" << std::endl;
+    std::shared_ptr<Convolution2D> pImpl;
+#ifdef USE_VULKAN
+    if (onGPU)
+    {
+      auto ctx = vk_utils::globalContextGet(false, 0);
+      pImpl = CreateConvolution2D_Generated(ctx, w * h);
+    }
+    else
+#endif
+      pImpl = std::make_shared<Convolution2D>();
+
+    pImpl->SetupGaussianBlurKernel(2, 1.0f);
+    const char* outPath = onGPU ? "out_gpu.png" : "out_cpu.png";
+    runAndSave(pImpl, w, h, hdrData, outPath);
+  }
+
+  return 0;
+}
+
+=== CMakeLists.txt ===
+
+cmake_minimum_required(VERSION 3.8)
+project(conv2d)
+
+add_definitions(-D_CRT_SECURE_NO_WARNINGS)
+set(CMAKE_CXX_STANDARD 17)
+option(USE_VULKAN "Enable Vulkan code" OFF)
+
+include_directories(".")
+
+if(WIN32)
+  link_directories(${ADDITIONAL_LIBRARY_DIRS})
+endif()
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}")
+message(STATUS ${CMAKE_CURRENT_SOURCE_DIR})
+
+find_package(OpenMP)
+find_package(Vulkan)
+include_directories(${Vulkan_INCLUDE_DIR})
+
+include_directories(
+  "../external/vkutils"
+  "../external/volk"
+  "../external/LiteMath"
+  "../external/stb"
+)
+
+link_directories("../external/volk")
+add_compile_definitions(USE_VOLK)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Wno-attributes")
+
+set(MAIN_SOURCE
+    main.cpp
+    convolution.cpp
+)
+
+set(VKGEN_SOURCE
+    convolution_generated.cpp
+    convolution_generated_init.cpp
+    convolution_generated_ds.cpp
+)
+
+set(VKUTILS_SOURCE
+    ../external/vkutils/vk_utils.cpp
+    ../external/vkutils/vk_copy.cpp
+    ../external/vkutils/vk_buffers.cpp
+    ../external/vkutils/vk_images.cpp
+    ../external/vkutils/vk_context.cpp
+    ../external/vkutils/vk_alloc_simple.cpp
+    ../external/vkutils/vk_pipeline.cpp
+    ../external/vkutils/vk_descriptor_sets.cpp
+)
+
+if(USE_VULKAN)
+  add_subdirectory(../external/volk)
+  add_compile_definitions(USE_VOLK)
+  add_compile_definitions(USE_VULKAN)
+
+  add_executable(testapp
+    ${MAIN_SOURCE}
+    ${VKGEN_SOURCE}
+    ${VKUTILS_SOURCE}
+  )
+
+  target_link_libraries(testapp LINK_PUBLIC
+    ${Vulkan_LIBRARY}
+    OpenMP::OpenMP_CXX
+    volk
+    dl
+  )
+else()
+  add_executable(testapp ${MAIN_SOURCE})
+
+  target_link_libraries(testapp LINK_PUBLIC
+    OpenMP::OpenMP_CXX
+  )
+endif()
+
+set_target_properties(testapp PROPERTIES
+  VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
+
+=== kmake.json === 
+
+{
+    "mainClass"     : "Convolution2D",
+    "options" : {
+        "-reorderLoops" : "YX",
+        "-shaderCC"     : "slang",
+        "-suffix"       : "_Generated",
+        "-const_ubo"    : "1"
+    },
+    "source"         : ["convolution.cpp"],
+    "includeProcess" : [],
+    "includeIgnore"  : ["../LiteMath"],
+    "end" : ""
+}
+
+

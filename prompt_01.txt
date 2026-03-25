@@ -143,7 +143,7 @@ void ReinhardTM::Run(int w, int h, const float* hdrData, uint32_t* ldrData)
 
   std::cout << "whitePoint = " << pImpl->getWhitePoint() << std::endl;
 
-=== "CMakeLists.txt" ===
+=== CMakeLists.txt ===
 
 cmake_minimum_required (VERSION 3.8)
 project (test)
@@ -221,7 +221,7 @@ endif()
 
 set_target_properties(testapp PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
-=== "kmake.json" ===
+=== kmake.json ===
 
 {
     "mainClass"     : "ReinhardTM", // must explicitly specify main class as main process 'unit' for kernel_slicer
