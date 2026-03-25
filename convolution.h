@@ -15,9 +15,14 @@ using LiteMath::float4;
 class Convolution2D
 {
 public:
-  Convolution2D(){}
+  Convolution2D()
+  {
+    // Pre-reserve capacity for a 3x3 kernel (9 elements) so that
+    // SetupXxxKernel() calls do not cause heap allocation in the common case.
+    m_kernel.reserve(9);
+  }
 
-  // Setup kernel functions (fill m_kernel, m_kw, m_kh)
+  // Setup convolution kernel for different image processing tasks
   void SetupBlurKernel(int radius);
   void SetupSharpenKernel();
   void SetupEdgeDetectKernel();
@@ -36,9 +41,9 @@ protected:
                                  const float* inData,
                                  float*       outData);
 
-  // convolution kernel stored as flat array [kh * kw]
+  // Convolution kernel stored as a flat array [m_kh * m_kw]
   std::vector<float> m_kernel;
-  int   m_kw = 1;
-  int   m_kh = 1;
+  int   m_kw  = 1;
+  int   m_kh  = 1;
   float m_time = 0.0f;
 };

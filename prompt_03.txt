@@ -1,3 +1,10 @@
+1. For some reason out_cpu_edges.png is always saved as 100% transparent.
+   Wheh i remove transparency explicitly from the image in the XMView, i can see correct edjes. 
+
+2. Please remove redundant second execution of gaussian blur from the end of the program. This is confusing when viewing the results.  
+
+=== main.cpp ===
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -141,3 +148,4 @@ int main(int argc, char** argv)
 
   return 0;
 }
+
